@@ -1,0 +1,46 @@
+#ifndef NETWORK_S3D
+#define NETWORK_S3D
+
+/* Network globals */
+SET BDC_PORT = 50023;
+SET BDC_ADDR = "192.168.100.255";
+var BdcChannel;
+
+SET PLAYER_TIMEOUT    = 2000;
+SET ADVERTISE_TIMEOUT = 200;
+SET SCORE_TIMEOUT     = 200;
+
+SET ADVERTISE_PDU = 0;
+SET UPDATE_PDU    = 1;
+SET SCORE_PDU     = 2;
+SET BULLETS_PDU   = 3;
+SET HIT_PDU       = 4;
+SET KILL_PDU      = 5;
+
+/* Function declarations */
+function NetworkInit();
+function NetworkRecv();
+function NetworkSend(PDU);
+
+
+function NetworkInit()
+{
+	BdcChannel = NetCreateChannel(BDC_PORT, "0.0.0.0", VR_NO_BLOCKING);
+}
+
+
+function NetworkRecv()
+{
+	var rcv_addr = "................";
+	var rcv_data = NetVarReceiveFrom(BdcChannel, &rcv_addr);
+	
+	return rcv_data;
+}
+
+
+function NetworkSend(PDU)
+{
+	NetVarSendTo(BDC_ADDR, BDC_PORT, PDU);
+}
+
+#endif /* NETWORK_S3D */
