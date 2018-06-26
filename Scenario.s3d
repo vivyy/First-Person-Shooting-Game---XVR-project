@@ -1,0 +1,518 @@
+#ifndef SCENARIO_S3D
+#define SCENARIO_S3D
+
+#include <Weapon.s3d>
+#include <Network.s3d>
+
+#define STEP_HEIGHT 1/2.9
+SET WEAPON_INTERVAL = 30000;
+
+class Scenario
+{
+// Private:
+	var FloorMesh, FloorObj;
+	var FloorMaterial, FloorTexture;
+	var WallMesh, WallObj;
+	var WallMaterial, WallTexture;
+	var SkyMesh, SkyMaterial, SkyTexture, SkyObj;
+	var Walls;
+	
+	var WeaponSpawns;
+	var WeaponCount;
+	var WeaponTimer;
+	
+	var ScoreTimer;
+	
+// Public:
+	var Width;
+	var Height;
+	
+	var Player;
+	var Enemies;
+	
+	var Camera;
+	var CameraFirst;
+
+	Init(filename);
+	Update();
+	Draw();
+	
+	AddEnemy(p);
+	GetById(pid);
+	UpdateFX(listener);
+	
+	IsColliding(pos, new_pos, radius);
+	IsBulletColliding(pos, radius);
+	IsWeaponSpawnAt(pos, radius);
+	getWallHeight(pos);
+	ExistID(pid);
+};
+
+
+function distance(p1, p2)
+{
+	return modulus(p1.x_z - p2.x_z);
+}
+
+
+function Scenario::Init(filename)
+{
+	/* Load scenario file */
+	var data = LoadFile(filename);
+	Height = len(data) - 1;
+	Width = len(data[0]);
+	
+	/* Initialize enemies */
+	Enemies = Array(0);
+	
+	/* Initialize camera */
+	Camera      = CameraGetCurrent();
+	CameraFirst = true;
+	
+	/* Initialize spawns */
+	WeaponSpawns = Array(0);
+	WeaponTimer  = 0;
+	WeaponCount  = 0;
+	
+	/* Initialize timers */
+	ScoreTimer = 0;
+	
+	/* Initialize wall data structure */
+	Walls = array(height);
+	for (var i = 0; i < height; i++)
+		Walls[i] = array(width);
+	
+	/* Initialize materials */
+	WallMaterial  = CVmMaterial();
+	FloorMaterial = CVmMaterial();
+	SkyMaterial   = CVmMaterial();
+	WallTexture  = CVmTexture("Mattoni04.png");
+	FloorTexture = CVmTexture("ground_texture.jpg");
+	SkyTexture   = CVmTexture("sky_texture.jpg");
+	
+	WallMaterial.Diffuse = [1, 1, 1];
+	WallMaterial.SetTexture(WallTexture);
+	FloorMaterial.Diffuse = [1, 1, 1];
+	FloorMaterial.SetTexture(FloorTexture);
+	SkyMaterial.SetTexture(SkyTexture);
+	SkyMaterial.Diffuse = [1, 1, 1];
+	FloorMaterial.ChangeTextureParams(VR_V_TILING, 10);
+	FloorMaterial.ChangeTextureParams(VR_U_TILING, 10);
+	/* Initialize meshes */
+	WallMesh = CVmNewMesh(VRP_BOX);
+	FloorMesh = CVmNewMesh(VRP_BOX);
+	SkyMesh = CVmNewMesh(VRP_SPHERE);
+	SkyMesh.FlipNormals(true);
+	SkyMesh.Scale(200);
+	
+	/* Position floor */
+	FloorMesh.Translate(0, -1,  0);
+	FloorMesh.Scale(width, 1, height);
+	
+	/* Apply materials */
+	//WallMesh.Scale(1, 1, 1);
+	WallMesh.ForceMaterial(WallMaterial);
+	FloorMesh.ForceMaterial(FloorMaterial);
+	FloorMesh.ModulateMaterials(1, 1, 1, 1);
+	SkyMesh.ForceMaterial(SkyMaterial);
+	/* Initialize objects */
+	WallObj = array(0);
+	FloorObj = CVmObj(FloorMesh);
+	SkyObj = CVmObj(SkyMesh);
+	
+	/* Parse level file */
+	for (var i = 0; i < height; i++)
+		for (var j = 0; j < width; j++)
+		{
+			var h = val(data[i][j]);
+			if (h >= 1 && h <= 9)
+			{
+				Walls[i][j] = h/3.0;
+				
+				/* Add wall piece */
+				var wall = CVmObj();
+				WallMaterial  = CVmMaterial();
+				WallMaterial.Diffuse = [1, 1, 1];
+				WallMaterial.SetTexture(WallTexture);
+				WallMaterial.ChangeTextureParams(VR_V_TILING, h/3.0);
+				WallMesh = CVmNewMesh(VRP_BOX);
+				WallMesh.Scale(1, h/3.0, 1);
+				WallMesh.ForceMaterial(WallMaterial);
+				wall.LinkToMesh(WallMesh);
+				wall.SetPosition(j, 0, i);
+				aadd(WallObj, wall);
+			}
+			else
+			{
+				Walls[i][j] = 0;
+				
+				if (data[i][j] == "W")
+					aadd(WeaponSpawns, {[j + 0.5, 0, i + 0.5], null});					
+			}
+		}
+}
+
+
+function Scenario::Draw()
+{
+	SkyObj.Draw();
+	/* Draw floor */
+	FloorObj.Draw();
+	
+	/* Draw walls */
+	foreach (var w in WallObj)
+		w.Draw();
+		
+	/* Draw player */
+	Player.Draw();
+		
+	/* Draw enemies */
+	foreach (var e in Enemies)
+		e.Draw();
+		
+	/* Draw spawns */
+	foreach (var s in WeaponSpawns)
+		if (s[1] != null)
+			s[1].Draw();
+}
+
+
+function Scenario::AddEnemy(p)
+{
+	p.Level = this;
+	aadd(Enemies, p);
+}
+
+
+function Scenario::UpdateFX(listener)
+{
+	Player.UpdateFX(listener);
+	
+	foreach (var e in Enemies)
+		e.UpdateFX(listener);
+}
+
+
+function Scenario::Update()
+{
+	/* Receive network updates */
+	var more = true;
+	while (more)
+	{
+		var data = NetworkRecv();
+		
+		if (data != void)
+		{
+			if (data[1] != Player.ID)
+			{
+				if (data[0] == ADVERTISE_PDU)
+				{
+					var enemy = GetById(data[1]);
+					
+					/* New player */
+					if (enemy == void)
+					{
+						OutputLN("Player " + str(data[1]) + " connected.");
+						AddEnemy(Swat(data[1], [data[2], data[3], data[4]], [0,0,0], false));
+						enemy = GetByID(data[1]);
+					}
+					
+					enemy.AdvertiseTimer = getTime();
+				}
+				else if (data[0] == UPDATE_PDU)
+				{
+					var enemy = GetById(data[1]);
+					
+					if (enemy != void)
+					{
+						enemy.Position      = [data[2], data[3], data[4]];
+						enemy.WalkDirection = [data[5], data[6], data[7]];
+						enemy.Pitch         = data[8];
+						enemy.Yaw           = data[9];
+						
+						if (data[10] == 0)
+							enemy.IsMoving = false;
+						else 
+						{
+							enemy.IsMoving = true;
+							
+							if (data[10] == 1)
+								enemy.IsRunning = false;
+							else
+								enemy.IsRunning = true;
+						}
+						
+						if (data[11] == 1)
+							enemy.IsShooting = true;
+						else
+							enemy.IsShooting = false;
+						
+						enemy.CurrentFrame = data[12];
+						enemy.Health       = data[13];
+						
+						if (data[13] != enemy.CurrWeapon)
+							enemy.SwapWeapon(data[14]);
+					}
+				}
+				else if (data[0] == SCORE_PDU)
+				{
+					var num = len(data) - 2;
+					
+					for (var i = 2; i < num; i += 2)
+					{
+						var e = GetById(data[i]);
+						
+						if (e != void && e.Score < data[i+1])
+							e.Score = data[i+1];
+					}
+				}
+				else if (data[0] == BULLETS_PDU)
+				{
+					var e   = GetById(data[1]);
+					var num = (len(data) - 2) / 8;
+					
+					asize(e.Bullets, num);
+					
+					for (var i = 2, j = 0; i < (num * 8); i += 8, j++)
+					{
+						var b = Bullet(e.Color, data[i+6], data[i+7]);
+						
+						b.Position.x  = data[i + 0];
+						b.Position.y  = data[i + 1];
+						b.Position.z  = data[i + 2];
+						b.Direction.x = data[i + 3];
+						b.Direction.y = data[i + 4];
+						b.Direction.z = data[i + 5];
+						b.IsFlying    = true;
+						
+						b.BulletObj.SetPosition(b.Position);
+						
+						e.Bullets[j] = b;
+					}
+				}
+				else if (data[0] == HIT_PDU)
+				{
+					/* If I've been hit */
+					if (data[2] == Player.ID)
+					{
+						Player.Health -= data[3];
+						Player.Hit();
+						
+						if (Player.Health <= 0)
+						{
+							Player.Respawn();
+							
+							var PDU = Vector(3);
+							PDU[0] = KILL_PDU;
+							PDU[1] = Player.ID;
+							PDU[2] = data[1];
+							
+							NetworkSend(PDU);
+						}
+					}
+				}
+				else if (data[0] == KILL_PDU)
+				{
+					/* I've killed someone */
+					if (data[2] == Player.ID)
+					{
+						Player.Scored();
+					}
+				}
+			}
+		}
+		else
+		{
+			more = false;
+		}
+	}
+	
+	/* Update player */
+	Player.Update(this);
+	
+	/* Update enemies */
+	for (var i = 0; i < len(Enemies); i++)
+	{
+		var e = Enemies[i];
+		
+		if (getTime() - e.AdvertiseTimer > PLAYER_TIMEOUT)
+		{
+			OutputLN("Player " + str(e.ID) + " disconnected.");
+			adel(Enemies, i);
+			i--;
+		}
+		else
+			e.Update(this);
+	}
+		
+	/* Check new spawns and update */
+	if (getTime() - WeaponTimer > WEAPON_INTERVAL)
+	{
+		WeaponTimer = getTime();
+		
+		var numSpawns = len(WeaponSpawns);
+		if (WeaponCount < numSpawns)
+		{
+			static var loc = 0;
+			
+			if (WeaponSpawns[loc][1] == null)
+			{
+				var w = (Rand(1) == 0) ? Weapon("railgun.aam", true) : Weapon("rocketl.aam", true);
+				w.SetSpawn(WeaponSpawns[loc][0]);
+			
+				WeaponCount++;
+				WeaponSpawns[loc][1] = w;	
+			}
+			
+			loc = (loc + 1) % numSpawns;
+		}
+	}
+	
+	for (var i = 0; i < len(WeaponSpawns); i++)
+	{
+		if (WeaponSpawns[i][1] != null)
+			WeaponSpawns[i][1].Update();
+	}
+	
+	/* Check player collision */
+	foreach (var b in Player.Bullets)
+		foreach (var e in Enemies)
+			if(distance(e.Position.x_z, b.Position.x_z) < (0.5 + b.Size) && 
+				((b.Position.y - e.Position.y) >= 0 &&
+				 (b.Position.y - e.Position.y) < 1.8))
+			{
+				b.IsFlying = false;
+				
+				e.Hit();
+				
+				outputln("hit");
+				
+				/* Confirm hit */
+				var PDU = Vector(4);
+				PDU[0] = HIT_PDU;
+				PDU[1] = Player.ID;
+				PDU[2] = e.ID;
+				PDU[3] = Player.Weapons[Player.CurrWeapon].Damage;
+				
+				NetworkSend(PDU);
+			}
+	
+	/* Update camera */
+	if (!CameraFirst)
+	{
+		var camPos = Camera.GetPosition();
+		var camDir = Camera.GetDirection();
+		
+		camPos += [0, 0.25, 0];
+		camPos += VectorRotate(190, Camera.GetYAxis(), camDir) * 2.0;
+		
+		Camera.SetPosition(camPos);
+	}
+	
+	/* Update effects */
+	UpdateFX(Camera);
+			
+	/* Send scores */
+	if (getTime() - ScoreTimer > SCORE_TIMEOUT)
+	{
+		scoreTimer = getTime();
+		
+		var PDU = Vector((len(Enemies) * 2) + 4);
+		PDU[0] = SCORE_PDU;
+		PDU[1] = Player.ID;
+		PDU[2] = Player.ID;
+		PDU[3] = Player.Score;
+		
+		var i = 4;
+		foreach (var e in Enemies)
+		{
+			PDU[i]   = e.ID;
+			PDU[i+1] = e.Score;
+			i += 2;
+		}
+		
+		NetworkSend(PDU);
+	}
+}
+
+function Scenario::IsColliding(pos, new_pos, radius)
+{
+	var a = [int(new_pos.x + radius), pos.y, int(new_pos.z + radius)];
+	var b = [int(new_pos.x - radius), pos.y, int(new_pos.z + radius)];
+	var c = [int(new_pos.x - radius), pos.y, int(new_pos.z - radius)];
+	var d = [int(new_pos.x + radius), pos.y, int(new_pos.z - radius)];	
+	
+	if (Walls[a.z][a.x] > a.y + STEP_HEIGHT ||
+		Walls[b.z][b.x] > b.y + STEP_HEIGHT ||
+		Walls[c.z][c.x] > c.y + STEP_HEIGHT ||
+		Walls[d.z][d.x] > d.y + STEP_HEIGHT) 
+		return true;
+		
+	return false;
+	
+}
+
+function Scenario::getWallHeight(pos)
+{
+	return Walls[int(pos.z)][int(pos.x)];
+}
+
+
+function Scenario::IsBulletColliding(pos, radius)
+{
+	var x = int(pos.x);
+	var z = int(pos.z);
+	
+	if (x < 0 || x >= Width ||
+		z < 0 || z >= Height)
+		return true;
+	
+	var h = Walls[z][x];
+
+	if (h >= pos.y)
+		return true;
+	else
+		return false;
+}
+
+function Scenario::IsWeaponSpawnAt(pos, radius)
+{
+	
+	foreach (var s in WeaponSpawns)
+		if (s[1] != null)
+		{
+			if (s[0].x > pos.x - radius && 
+				s[0].x < pos.x + radius &&
+			    s[0].z > pos.z - radius && 
+			    s[0].z < pos.z + radius)
+			    {
+			    	var id = s[1].Id;
+			    	s[1] = null;
+					WeaponCount --;
+					
+					return id;
+			    }
+		}
+
+	return -1;
+}
+
+function Scenario::ExistID(pid)
+{
+	foreach (var e in Enemies)
+		if (e.ID == pid)
+			return true;
+			
+	return false;
+}
+
+function Scenario::GetById(pid)
+{
+	foreach (var e in Enemies)
+		if (e.ID == pid)
+			return e;
+			
+	return void;
+}
+
+#endif
