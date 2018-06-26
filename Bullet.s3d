@@ -1,0 +1,85 @@
+#ifndef BULLET_S3D
+#define BULLET_S3D
+
+SET BULLET_SPEED = 1.0;
+
+class Bullet
+{
+// Private:
+	var BulletMesh, BulletObj;
+	var Traveled;
+	
+// Public:
+	var Color;
+	var	Position;
+	var Direction;
+	var Speed;
+	var Size;
+	var IsFlying;
+	
+	
+	Update(level);
+	Draw();
+	
+	Shoot(pos, dir);
+};
+
+
+function Bullet::Bullet(col, sz, vel)
+{
+	/* Initialize bullet variables */
+	Color     = col;
+	Position  = [0, 0, 0];
+	Direction = [0, 0, 0];
+	Traveled  = 0;
+	Speed     = vel;
+	Size      = sz;
+	IsFlying  = false;
+
+	/* Initialize mesh */
+	BulletMesh = CVmNewMesh(VRP_SPHERE);
+	BulletObj  = CVmObj(BulletMesh);
+	
+	BulletMesh.Normalize(Size);
+	BulletMesh.ModulateMaterials(Color);
+}
+
+
+function Bullet::Shoot(pos, dir)
+{
+	Position  = pos; 
+	Direction = dir;
+	Traveled  = 0;
+	IsFlying  = true;
+}
+
+
+function Bullet::Update(level)
+{
+	var oldPosition = Position;
+	
+	if (IsFlying)
+	{
+		/* Update position */
+		Position += Direction * Speed;
+		Traveled += modulus(Direction * Speed);
+		
+		/* Check collision with level */
+		if (Position.y < 0 || Traveled > 500 || level.IsBulletColliding(Position, Size))
+			IsFlying = false;
+		else
+			BulletObj.SetPosition(Position);
+	}
+}
+
+
+function Bullet::Draw()
+{	
+	/* Draw bullet */
+	if(IsFlying)
+	{
+		BulletObj.Draw();
+	}
+}
+
+#endif
