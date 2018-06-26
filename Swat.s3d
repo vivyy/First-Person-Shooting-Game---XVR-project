@@ -1,0 +1,601 @@
+#ifndef SWAT_S3D
+#define SWAT_S3D
+
+#include <Bullet.s3d>
+#include <Network.s3d>
+#include <Weapon.s3d>
+
+SET ANGLE_STEP	= 1;
+SET START_FRAME = 16;
+SET END_FRAME 	= 48;
+
+SET MAX_HEALTH  = 100;
+SET RELOAD_TIME = 1000;
+
+SET CAMERA_FOV    = 60;
+SET CAMERA_NEAR   = 0.32;
+SET CAMERA_FAR    = 300;
+SET CAMERA_HEIGHT = 1.5;
+
+SET GRAVITY = 0.006;
+
+
+class Swat
+{
+// Private:
+	var Level;
+	var RootObj;
+	var UpperMesh,    UpperObj;
+	var LowerMesh,    LowerObj;
+	var WeaponObj;
+	var CurrentFrame;
+	
+	var Bullets;
+	var BulletNum;
+	var ReloadTimer;
+	
+	var Camera;
+	
+	var FX_Hit;
+	var FX_Shoot;
+	var FX_Jam;
+	var FX_Step;
+	var FireBillboard, FireObj;
+	var HitAnimLength;
+	
+	var AdvertiseTimer;
+	var StepTimer;
+// Public:
+	var Id;
+	var Color;
+	var Position;
+	var Direction;
+	var WalkDirection;
+	var Pitch, Yaw; /* in GRAD */
+	var FallSpeed;
+	var Score;
+	var Health;
+	var CurrWeapon;
+	var Weapons;
+	var IsMoving;
+	var IsRunning;
+	var IsFalling;
+	var IsShooting;
+	var IsReloading;
+	var CanShoot;
+	var IsLocal;
+	
+
+	Update();
+	UpdateFX(listener);
+	Draw();
+	
+	ParseKeyboard();
+	DeadReckoning();
+	SwapWeapon(id);
+	
+	Respawn();
+	Scored();
+	Hit();
+};
+
+
+function Swat::Swat(p_id, p_color, p_pos, p_local)
+{
+	/* Initialize player variables */
+	Id 			  = p_id;
+	Color		  = p_color;
+	Position      = p_pos;
+	Direction     = [0, 0, 0];
+	WalkDirection = [0, 0, 0];
+	Pitch     	  = 0;
+	Yaw           = 0;
+	FallSpeed     = 0;
+	Score		  = 0;
+	Health        = MAX_HEALTH;
+	CurrWeapon    = 0;
+	IsMoving      = false;
+	IsRunning     = false;
+	IsFalling     = false;
+	IsShooting    = false;
+	IsReloading   = false;
+	CanShoot      = true;
+	IsLocal       = p_local;
+	
+	/* Initialize weapons */
+	Weapons = Array(2);
+	
+	Weapons[0] = Weapon("railgun.aam", false);
+	Weapons[1] = Weapon("rocketl.aam", false);
+	
+	/* Initialize camera */
+	Camera      = CVmCamera();
+	
+	Camera.SetFovY(CAMERA_FOV);
+	Camera.SetZNear(CAMERA_NEAR);
+	Camera.SetZFar(CAMERA_FAR);
+	
+	/* Initialize network */
+	AdvertiseTimer = 0;
+	StepTimer = 0;
+	/* Initialize bullets */
+	BulletNum    = 0;
+	Bullets      = Array(0);
+	ReloadTimer  = -RELOAD_TIME;
+	
+	/* Initialize effects */
+	FX_Hit        = CVmVRAWav("hit.wav", true);
+	FX_Shoot      = CVmVRAWav("shoot.wav", true);
+	FX_Jam        = CVmVRAWav("jam.wav", true);
+	FX_Step		  = CVmVRAWav("step.wav", true);
+	FireBillboard = CVmBillboard("flame43.avi", 0.5, 0.5);
+	FireObj       = CVmObj();
+	HitAnimLength = 0;
+	
+	FireObj.LinkToBillboard(FireBillboard);
+	FireObj.SetPosition(Position);
+	
+	/* Initialize animations */
+	CurrentFrame = START_FRAME;
+	
+	/* Initialize meshes */
+	UpperMesh    = CVmNewMesh("swat_upper.aam");
+	LowerMesh    = CVmNewMesh("swat_lower.aam");
+		
+	UpperMesh.Scale(0.04);
+	LowerMesh.Scale(0.04);
+	
+	/* Initialize objects */
+	UpperObj  = CVmObj(UpperMesh);
+	LowerObj  = CVmObj(LowerMesh);
+	WeaponObj = CVmObj();
+	
+	UpperObj.SetPivotPoint(0, 1, 0);
+	WeaponObj.SetPivotPoint(0, 1, 0);
+	
+	RootObj = CVmObj();
+	RootObj.AddChild(UpperObj);
+	RootObj.AddChild(LowerObj);
+	RootObj.AddChild(WeaponObj);
+	
+	RootObj.ModulateMaterials(Color);
+
+	SwapWeapon(0);	
+}
+
+
+function Swat::Draw()
+{
+	/* Draw player */
+	RootObj.Draw(VR_FRAMENUMBER, CurrentFrame);
+	foreach (var b in Bullets)
+		b.Draw();
+	
+	/* Draw hit effect */
+	if(HitAnimLength > 0)
+	{
+		glDisable(GL_LIGHTING);
+		glEnable(GL_BLEND);
+		glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_COLOR);
+		glColor(1, 1, 1);
+		glDisable(GL_DEPTH_TEST);
+		FireObj.Draw();
+		glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
+		glEnable(GL_LIGHTING);
+		glEnable(GL_DEPTH_TEST);
+		HitAnimLength--;
+	}
+}
+
+
+function Swat::Update()
+{
+	/* Actions taken only if instance of local player */
+	if (IsLocal)
+	{
+		/* Parse new events */
+		ParseKeyboard();
+		
+		/* Update bullets */
+		for (var i = 0; i < BulletNum; i++)
+		{
+			var b = Bullets[i];
+			b.Update(level);
+			
+			if (!b.IsFlying)
+			{
+				adel(Bullets, i);
+				BulletNum--;
+				i--;
+			}
+		}
+		
+		/* Advertise presence */
+		if (getTime() - AdvertiseTimer > ADVERTISE_TIMEOUT)
+		{
+			AdvertiseTimer = getTime();
+			
+			var PDU = Vector(5);
+			PDU[0] = ADVERTISE_PDU;
+			PDU[1] = ID;
+			PDU[2] = Color.r;
+			PDU[3] = Color.g;
+			PDU[4] = Color.b;
+			
+			NetworkSend(PDU);
+		}
+		
+		{
+			/* Send player data */
+			var PDU = Vector(15);
+			PDU[0] = UPDATE_PDU;
+			PDU[1] = ID;
+			PDU[2] = Position.x;
+			PDU[3] = Position.y;
+			PDU[4] = Position.z;
+			PDU[5] = WalkDirection.x;
+			PDU[6] = WalkDirection.y;
+			PDU[7] = WalkDirection.z;
+			PDU[8] = Pitch;
+			PDU[9] = Yaw;
+			
+			/* TODO: dead reckoning, add running check */
+			if (IsRunning)
+				PDU[10] = 2;
+			else if (IsMoving)
+				PDU[10] = 1;
+			else
+				PDU[10] = 0;
+				
+			if (IsShooting)
+				PDU[11] = 1;
+			else
+				PDU[11] = 0;
+			
+			PDU[12] = CurrentFrame;
+			PDU[13] = Health;
+			PDU[14] = CurrWeapon;
+			
+			NetworkSend(PDU);
+		}
+		
+		{
+			/* Send bullet data */
+			var PDU = Vector((BulletNum * 8) + 2);
+			PDU[0] = BULLETS_PDU;
+			PDU[1] = ID;
+			
+			var i = 2;
+			foreach (var b in Bullets)
+			{
+				PDU[i + 0] = b.Position.x;
+				PDU[i + 1] = b.Position.y;
+				PDU[i + 2] = b.Position.z;
+				PDU[i + 3] = b.Direction.x;
+				PDU[i + 4] = b.Direction.y;
+				PDU[i + 5] = b.Direction.z;
+				PDU[i + 6] = b.Size;
+				PDU[i + 7] = b.Speed;
+			}
+			
+			NetworkSend(PDU);
+		}
+	}
+	else /* Remote player */
+	{
+		DeadReckoning();
+	}
+
+	/* Update animation */
+	if(CurrentFrame > END_FRAME) CurrentFrame = START_FRAME;
+	if(CurrentFrame < START_FRAME) CurrentFrame = END_FRAME;
+	
+	if(!IsMoving)
+		CurrentFrame = 0;
+	
+	/* Update player position */
+	RootObj.SetPosition(Position);
+	RootObj.SetRotation(Yaw, [0, 1, 0]);
+	
+	UpperObj.SetRotation(Pitch, [-1, 0, 0]);
+	WeaponObj.SetRotation(Pitch, [-1, 0, 0]);
+		
+	/* Update FX position */
+	FX_Hit.SetPosition(Position);
+	FX_Shoot.SetPosition(Position);
+	FX_Jam.SetPosition(Position);
+	FX_Step.SetPosition(Position);
+	
+	FireObj.SetPosition(Position + [0, 1, 0]);
+	
+	/* Update camera */
+	var normal = VectorRotate(-90, [0,1,0], Direction.x_z);
+	var camPos = [Position.x, Position.y + 1.0, Position.z] +
+				 VectorRotate(Pitch, normal, [0, CAMERA_HEIGHT - 1.0, 0]);
+	
+	Camera.SetPosition(camPos);
+	Camera.SetDirection(Direction);
+	
+	/* Play FX */
+	if (isRunning && !FX_Step.isPlaying())
+	{
+		FX_Step.Play();
+	}
+	else if (isMoving && !FX_Step.isPlaying() && getTime() - stepTimer > 600)
+	{
+		stepTimer = getTime();
+		FX_Step.Play();
+	} 
+	
+	if (IsShooting)
+	{
+		FX_Shoot.SetFrequency(Weapons[CurrWeapon].Frequency);
+		FX_Shoot.Play();
+	}
+}
+
+
+function Swat::UpdateFX(listener)
+{
+	var pos   = listener.GetPosition();
+	var front = listener.GetZAxis(); 
+	var top   = listener.GetYAxis();
+	
+	FX_Hit.SetListenerPosition(pos);
+	FX_Hit.SetListenerOrientation(-front, top);
+	
+	FX_Shoot.SetListenerPosition(pos);
+	FX_Shoot.SetListenerOrientation(-front, top);
+	
+	FX_Jam.SetListenerPosition(pos);
+	FX_Jam.SetListenerOrientation(-front, top);
+	
+	FX_Step.SetListenerPosition(pos);
+	FX_Step.SetListenerOrientation(-front, top);
+}
+
+
+function Swat::Hit()
+{
+	HitAnimLength = 30;
+	FX_Hit.Play();
+}
+
+
+function Swat::Scored()
+{
+	Score++;
+}
+
+
+function Swat::Respawn()
+{
+	Direction     = [0, 0, 0];
+	Pitch         = 0;
+	Yaw           = 0;
+	Health        = MAX_HEALTH;
+	
+	HitAnimLength = 0;
+	
+	while (true)
+	{
+		var x = Rand(Level.Width - 1) + 0.5;
+		var z = Rand(Level.Height - 1) + 0.5;
+		
+		if (!Level.IsColliding([0,0,0], [x, 0, z], 0))
+		{
+			Position = [x, 0, z];
+			return;
+		}
+	}
+}
+
+function Swat::SwapWeapon(id)
+{
+	WeaponObj.RemoveChild(Weapons[CurrWeapon].Obj);
+	CurrWeapon = id;
+	WeaponObj.AddChild(Weapons[id].Obj);
+}
+
+function Swat::ParseKeyboard()
+{
+	var step        = 0.05;
+	var mouseStep   = 0.2;
+	var animStep    = 0.5;
+	var oldPosition = Position;
+	var strafeDir   = [0, 0, 0];
+	var frontDir    = [0, 0, 0];
+	
+	var mouseDelta = [Mouse.DeltaX, Mouse.DeltaY];
+	
+	IsRunning = false;
+	IsMoving  = false;
+	
+	Yaw      -= mouseDelta.X * mouseStep;
+	Pitch    -= mouseDelta.Y * mouseStep;
+	
+	if (Pitch >= 70)
+		Pitch = 70;
+	else if (Pitch <= -70)
+		Pitch = -70;
+	
+	if (!IsFalling)
+		WalkDirection = [0, 0, 0];
+		
+	Direction = [ sin(Yaw * GRAD_TO_RAD),
+				  sin(Pitch * GRAD_TO_RAD),
+				  cos(Yaw * GRAD_TO_RAD) ];
+	
+	/* Shift: run */
+	if (!IsFalling && KeyPressed(VK_SHIFT))
+	{
+		IsRunning = true;
+		step *= 3;
+		animStep *= 2;
+	}
+	
+	/* Turn right */
+	if (KeyPressed("D"))
+	{
+		strafeDir = VectorRotate(-90, [0,1,0], Direction.x_z);
+		CurrentFrame += animStep;
+		IsMoving = true;
+	}	
+	/* Turn left */
+	else if (KeyPressed("A"))
+	{
+		strafeDir = VectorRotate(90, [0,1,0], Direction.x_z);
+		CurrentFrame += animStep;
+		IsMoving = true;
+	}
+		
+	/* Go forward */
+	if (KeyPressed("W"))
+	{
+		frontDir = Direction.x_z;
+		CurrentFrame += animStep;
+		IsMoving = true;
+	}
+	/* Go backward */
+	else if (KeyPressed("S"))
+	{
+		frontDir = - Direction.x_z;
+		CurrentFrame -= animStep;
+		IsMoving = true;
+	}
+	
+	/* Update position */
+	if (!IsFalling)
+		WalkDirection = strafeDir + frontDir;
+	
+	if (WalkDirection != [0, 0, 0])
+		WalkDirection = norm(WalkDirection);
+		
+	Position += step * WalkDirection;
+	
+	if (IsFalling)
+	{
+		FallSpeed -= GRAVITY;
+		Position.y += FallSpeed;
+		
+		if (Position.y <= 0)
+		{
+			Position.y = 0;
+			IsFalling = false;
+		}
+	}
+	else
+	{
+		FallSpeed = 0;
+	}
+	
+	/* Reload */
+	if (getTime() - ReloadTimer > RELOAD_TIME)
+	{
+		IsReloading = false;
+
+		if (KeyPressed("R") && Weapons[CurrWeapon].Reload())
+		{
+			ReloadTimer = getTime();
+		}
+	}
+	else
+	{
+		IsReloading = true;
+	}
+	
+	/* Shoot */
+	IsShooting = false;
+	if (Mouse.ButtonL && CanShoot && !IsReloading)
+	{
+		var w = Weapons[CurrWeapon];
+		
+		if (w.ClipCurrent > 0) 
+		{
+			w.ClipCurrent--;
+			
+			var b = Bullet(Color, w.BulletSize, w.BulletSpeed);
+			aadd(Bullets, b);
+			BulletNum++;	
+			
+			var bbox = w.Mesh.SubsetGetBoundingBox(0);
+			var pos = Position + VectorRotate(Yaw, [0,1,0], [(bbox[0] + bbox[3]) / 2,
+				                                             (bbox[1] + bbox[4]) / 2,
+				                                             bbox[5]]);
+			
+			IsShooting = true;
+			b.Shoot(pos, Direction);
+		}
+		else
+		{
+			FX_Jam.Play();
+		}
+		
+		CanShoot = false;
+	}
+	else if (!Mouse.ButtonL)
+	{
+		CanShoot = true;
+	}
+	
+	/* Swap weapons */
+	static var changing_w = false;
+	if (KeyPressed("1") && !changing_w)
+	{
+		SwapWeapon(0);
+		changing_w = true;
+	}
+	else if (KeyPressed("2") && !changing_w)
+	{
+		SwapWeapon(1);
+		changing_w = true;
+	}
+	else if (!KeyPressed("1") && !KeyPressed("2"))
+	{
+		changing_w = false;
+	}
+	
+	/* Check collision */
+	if (!IsFalling && Level.IsColliding(oldPosition, Position, 0.3))
+		Position = oldPosition;
+	else if (Position.y <= Level.getWallHeight(Position))
+		Position.y = Level.getWallHeight(Position);
+	else
+		IsFalling = true;
+
+	var wId = Level.IsWeaponSpawnAt(Position, 0.5);	
+	if (wId >= 0)
+	{
+		/* TODO */
+		var w = Weapons[wId];
+		w.ClipRemaining = w.ClipSize * w.ClipNum;
+	}
+}
+
+function Swat::DeadReckoning()
+{
+	var step     = 0.05;
+	var animStep = 0.5;
+	
+	Direction = [ sin(Yaw * GRAD_TO_RAD),
+				  sin(Pitch * GRAD_TO_RAD),
+				  cos(Yaw * GRAD_TO_RAD) ];
+	/* TODO */
+	
+	if (IsRunning)
+	{
+		step *= 3;
+		animStep *= 2;
+	}
+	
+	if (IsMoving)
+	{
+		Position += step * WalkDirection;
+		CurrentFrame += animStep;
+	}
+	
+	foreach (var b in Bullets)
+		b.Update(level);
+}
+
+#endif
