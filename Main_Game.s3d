@@ -1,0 +1,245 @@
+/* Include s3d symbols */
+#include <Script3d.h>
+#include <Camera.s3d.h>
+#include <Swat.s3d>
+#include <Scenario.s3d>
+#include <Network.s3d>
+
+/* Set global scene parameters */
+SET AUDIO_OPENAL = 1;
+
+/* Camera globals */
+SET CAMERA_HEIGHT = 1.5;
+var CamPos = [0.0, 5.0, 30.0]; 	// camera position
+var CameraFirst = true;
+var GrabMouse = false;
+
+/* Light globals */
+var Light0;
+var AmbientLight;
+var PosL = [16.0, 10.0, 16.0];	// default light position
+var AmbientPos = [0, 20, 0];
+/* Game globals */
+SET LOGIN_TIMEOUT = 2000;
+
+var PlayerID = 0; /* start with an invalid ID */
+var Level;
+
+/* Function declarations */
+function DisplayScoreboard();
+function DisplayStatus();
+function ShowCrosshair();
+
+
+function DisplayScoreboard()
+{
+	var x = 0.05, y = 0.9;
+	var i = 0;
+	
+	ConsoleFont("Tahoma", 20);
+	
+	ConsoleColor(Level.Player.Color);
+	ConsoleText(x, y, "Player " + str(Level.Player.ID) + ":\t\t" + str(Level.Player.Score));
+	
+	y -= 0.025;
+	ConsoleLines([x, y, x + 0.3, y]);
+	
+	foreach (var e in Level.Enemies)
+	{
+		y -= 0.05;
+		
+		ConsoleColor(e.Color);
+		ConsoleText(x, y, "Player " + str(e.ID) + ":\t\t" + str(e.Score));
+	}
+}
+
+
+function DisplayStatus()
+{
+	var p = Level.Player;
+	var w = p.Weapons[p.CurrWeapon];
+	
+	ConsoleFont("Tahoma", 20);
+	ConsoleColor([1, 1, 0]);
+	
+	ConsoleText(0.05, 0.1, str(w.ClipCurrent) + " / " + str(w.ClipRemaining));
+	ConsoleText(0.05, 0.05, str(p.Health));
+	
+	if (p.IsReloading)
+	{
+		ConsoleFilledRect(0.05, 0.2, 0.05, 0.01);
+	}
+}
+
+
+function ShowCrosshair()
+{
+	ConsoleColor([1, 1, 1]);
+	ConsoleLines([0.5, 0.47, 0.5, 0.53]);
+	ConsoleLines([0.48, 0.5, 0.52, 0.5]);
+}
+
+
+function OnDownload()
+{
+	/* Extract game files */
+	FileDownload("XVRResources.zip");
+}
+
+
+function OnInit(params)
+{
+	/* Limit framerate */
+	SetFramerate(60);
+	
+	/* Hide cursor */
+	GrabMouse = true;
+	ShowCursor(false);
+	ShowCursor(false); /* FIX */
+	
+	/* Initialize scenario */
+	Level = Scenario();
+	Level.Init("level.txt");
+	
+	/* Initialize network */
+	NetworkInit();
+	
+	var loginTimer = getTime();
+	OutputLN("Logging in..");
+	while (getTime() - loginTimer < LOGIN_TIMEOUT)
+	{
+		var data = NetworkRecv();
+		if (data != void)
+		{
+			/* No ID check, we're not sending anything yet */
+			
+			/* Receive data from existing players in the game */
+			if (data[0] == ADVERTISE_PDU)
+			{
+				var enemy = Level.GetByID(data[1]);
+
+				/* New player */
+				if (enemy == void)
+				{
+					OutputLN("Player " + str(data[1]) + " connected.");
+					Level.AddEnemy(Swat(data[1], [data[2], data[3], data[4]], [0,0,0], false));
+					enemy = Level.GetByID(data[1]);
+				}
+				
+				/* Update player ID */
+				if (enemy.ID >= PlayerID)
+					PlayerID = enemy.ID + 1;
+			}
+		}
+		
+		/* Yield CPU */
+		Sleep(20);
+	}	
+	OutputLN("Login terminated!");
+	
+	/* Initialize player */
+	var rand_col = [rand(100) / 100.0, rand(100) / 100.0, rand(100) / 100.0];
+	var p = Swat(PlayerID, rand_col, [0, 0, 0], true);
+	p.Level = Level;
+	p.Respawn();
+	
+	Level.Player = p;
+	Level.Camera = p.Camera;
+
+	/* Initialize light */
+	Light0 = CVmLight();
+	Light0.SetPosition(PosL);
+	//Light0.SetDiffuse(1, 1, 1);
+	Light0.SetParameter(GL_SPOT_EXPONENT, 30);
+	Light0.SetParameter(GL_SPOT_CUTOFF, 90);
+	Light0.Enable();
+	
+	AmbientLight = CVmLight();
+	AmbientLight.SetPosition(AmbientPos);
+	Light0.SetParameter(GL_SPOT_EXPONENT, 30);
+	AmbientLight.Enable();
+	
+	
+//	/* DEBUG: add dummies */
+//	Level.AddEnemy(Swat(1, [0,1,0], [0, 0, 0], false));
+//	Level.AddEnemy(Swat(2, [0,0,1], [0, 0, 0], false));
+//	
+//	foreach (var e in Level.Enemies)
+//		e.Respawn();
+}
+
+
+function OnFrame()
+{
+	/* Parse commands */
+	if (KeyPressed(VK_TAB))
+		DisplayScoreboard();
+	
+	static var esc_pressed = false;
+	if (KeyPressed(VK_ESCAPE) && !esc_pressed)
+	{
+		esc_pressed = true;
+		GrabMouse = !GrabMouse;
+		ShowCursor(!GrabMouse);
+	}
+	else
+		esc_pressed = false;
+		
+	if (KeyPressed("F"))
+		Level.CameraFirst = true;
+		
+	if (KeyPressed("T"))
+		Level.CameraFirst = false;
+	
+	/* Game game */
+	Level.Update();
+	
+	/* Show status */
+	DisplayStatus();
+	ShowCrosshair();
+	 
+	/* Update lights */
+	Light0.SetPosition(Level.Player.Position);
+	
+	/* Keep mouse cursor centered */
+	if (GrabMouse)
+		SetCursorPos(0.5, 0.5);
+	
+	/* Draw scene */
+	SceneBegin(Level.Camera);
+
+	Level.Draw();
+
+	SceneEnd();
+	
+	if (len(Level.Enemies) > 0)
+	{
+		SceneBeginRel(Level.Enemies[0].Camera, 0.8, 0.8, 0.2, 0.2);
+		
+		Level.Draw();
+		
+		SceneEnd();
+	}
+}
+
+
+
+function DownloadReady(RequestID)
+{
+}
+
+function OnTimer()
+{
+}
+
+function OnEvent(eventID, wparam, lparam)
+{
+}
+
+function OnError()
+{
+}
+
+function OnExit()
+{
+}
